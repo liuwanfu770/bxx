@@ -1,31 +1,145 @@
-name: Auto Organize Files
+name: Automated CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  organize-files:
+  organize-build-test:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. 检出代码
       - name: Checkout code
         uses: actions/checkout@v2
 
-      - name: Set up file organization
+      # 2. 缓存 Node.js 依赖
+      - name: Cache Node modules
+        uses: actions/cache@v2
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      # 3. 文件分类和 README 生成
+      - name: Organize files into folders
         run: |
           mkdir -p 文档 源码 测试
           mv *.md 文档/ || true
           mv *.js 源码/ || true
           mv *.yml 测试/ || true
 
-      - name: Commit organized files
+      - name: Generate README files for each folder
+        run: |
+          for dir in 文档 源码 测试; do
+            if [ ! -f "$dir/README.md" ]; then
+              echo "# $dir 文件夹" > $dir/README.md
+              echo "此文件夹包含 $dir 的所有相关文件。" >> $dir/README.md
+            fi
+          done
+
+      # 4. 设置 Node.js 并安装依赖
+      - name: Set up Node.js and install dependencies
+        uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npm install --save-dev jest eslint
+
+      # 5. 代码质量分析（SonarQube）
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # 6. 安全扫描（Snyk）
+      - name: Security Scan with Snyk
+        uses: snyk/actions/setup@v1
+        with:
+          token: ${{ secrets.SNYK_TOKEN }}
+        run: snyk test
+
+      # 7. 代码格式化检查并自动修复
+      - name: Lint and Auto-fix Code
+        run: |
+          npx eslint "**/*.js" --fix || echo "Linting issues detected and partially fixed."
+
+      # 8. 运行测试并生成覆盖率报告
+      - name: Run Tests with Coverage
+        run: |
+          npx jest --coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      # 9. 性能测试（Artillery）
+      - name: Performance Test with Artillery
+        run: |
+          npm install -g artillery
+          artillery run performance-test.yml || echo "Performance tests completed with issues."
+
+      # 10. 生成文档（JSDoc）
+      - name: Generate Documentation
+        run: |
+          npx jsdoc -c jsdoc.json
+
+      - name: Deploy Documentation to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+
+      # 11. 提交文件更改（分类、README、格式修复）
+      - name: Commit organized files, README, and linted code
         run: |
           git config --global user.name 'GitHub Action'
           git config --global user.email 'action@github.com'
           git add .
-          git commit -m "Auto-organize files into folders" || echo "No changes to commit"
+          git commit -m "Automated organization, README generation, and code formatting" || echo "No changes to commit"
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: organize-build-test
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      # 12. 自动创建发布版本
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: "Release v${{ github.run_number }}"
+          body: "Auto-generated release by GitHub Actions."
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: organize-build-test
+    if: failure()
+    steps:
+      # 13. 测试失败时发送通知
+      - name: Notify on Failure
+        uses: slackapi/slack-github-action@v1.15.0
+        with:
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          text: "🚨 Test failed in the latest commit on main branch!"
